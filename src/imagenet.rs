@@ -40,6 +40,12 @@ pub fn load_image<P: AsRef<std::path::Path>>(p: P, res: usize) -> Result<Tensor>
 }
 
 /// Loads an image from disk using the image crate, this returns a tensor with shape
+/// (3, 224, 224). imagenet normalization is applied.
+pub fn load_image224<P: AsRef<std::path::Path>>(p: P) -> Result<Tensor> {
+    load_image(p, 224)
+}
+
+/// Loads an image from disk using the image crate, this returns a tensor with shape
 /// (3, 518, 518). imagenet normalization is applied.
 /// The model dinov2 reg4 analyzes images with dimensions 3x518x518 (resulting in 37x37 transformer tokens).
 pub fn load_image518<P: AsRef<std::path::Path>>(p: P) -> Result<Tensor> {
