@@ -1,212 +1,200 @@
-use candle_core::D::Minus1;
-use candle_core::{IndexOp, Result, Tensor, D};
-use candle_nn::{layer_norm, LayerNorm, Linear, Module, VarBuilder};
+use tch::{nn, IndexOp, Kind, Tensor};
+use tch::nn::Module;
 
-const IMG_SIZE: usize = 518;
-const PATCH_SIZE: usize = 14;
-const NUM_CLASSES: usize = 1000;
-
-fn linear(vb: VarBuilder, in_dim: usize, out_dim: usize, bias: bool) -> Result<Linear> {
-    if bias {
-        candle_nn::linear(in_dim, out_dim, vb)
-    } else {
-        candle_nn::linear_no_bias(in_dim, out_dim, vb)
-    }
-}
+pub const IMG_SIZE: i64 = 518;
+const PATCH_SIZE: i64 = 14;
+const NUM_CLASSES: i64 = 1000;
 
 #[derive(Debug)]
 struct Attention {
-    qkv: Linear,
-    output: Linear,
-    num_heads: usize,
+    qkv: nn::Linear,
+    output: nn::Linear,
+    num_heads: i64,
     scale: f64,
 }
 
 impl Attention {
     fn new(
-        vb: VarBuilder,
-        dim: usize,
-        num_heads: usize,
+        vs: nn::Path,
+        dim: i64,
+        num_heads: i64,
         qkv_bias: bool,
         proj_bias: bool,
-    ) -> Result<Self> {
-        let query = linear(vb.pp("attention").pp("query"), dim, dim, qkv_bias)?;
-        let key = linear(vb.pp("attention").pp("key"), dim, dim, qkv_bias)?;
-        let value = linear(vb.pp("attention").pp("value"), dim, dim, qkv_bias)?;
+    ) -> Self {
+        let qkv_config = nn::LinearConfig { bias: qkv_bias, ..Default::default() };
+        let proj_config = nn::LinearConfig { bias: proj_bias, ..Default::default() };
 
-        let qkv_weight = Tensor::cat(&[query.weight(), key.weight(), value.weight()], 0)?;
+        let attn = &vs / "attention";
+        let query = nn::linear(&attn / "query", dim, dim, qkv_config);
+        let key = nn::linear(&attn / "key", dim, dim, qkv_config);
+        let value = nn::linear(&attn / "value", dim, dim, qkv_config);
+
+        let qkv_weight = Tensor::cat(&[query.ws, key.ws, value.ws], 0);
         let qkv_bias = if qkv_bias {
             Some(Tensor::cat(
                 &[
-                    query.bias().unwrap(),
-                    key.bias().unwrap(),
-                    value.bias().unwrap(),
+                    query.bs.unwrap(),
+                    key.bs.unwrap(),
+                    value.bs.unwrap(),
                 ],
                 0,
-            )?)
+            ))
         } else {
             None
         };
 
-        let qkv = Linear::new(qkv_weight, qkv_bias);
-
-        let output = linear(vb.pp("output").pp("dense"), dim, dim, proj_bias)?;
+        let qkv = nn::Linear { ws: qkv_weight, bs: qkv_bias };
+        let output = nn::linear(&vs / "output" / "dense", dim, dim, proj_config);
         let scale = 1. / ((dim / num_heads) as f64).sqrt();
-        Ok(Self {
+        Self {
             qkv,
             output,
             num_heads,
             scale,
-        })
+        }
     }
 }
 
-impl Module for Attention {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let (b, n, c) = xs.dims3()?;
+impl nn::Module for Attention {
+    fn forward(&self, xs: &Tensor) -> Tensor {
+        let (b, n, c) = xs.size3().unwrap();
         let qkv = self
             .qkv
-            .forward(xs)?
-            .reshape((b, n, 3, self.num_heads, c / self.num_heads))?
-            .transpose(1, 2)? // 02134
-            .transpose(0, 1)? // 20134
-            .transpose(2, 3)?; // 20314
-        let q = (qkv.i(0)? * self.scale)?;
-        let k = qkv.i(1)?.contiguous()?;
-        let v = qkv.i(2)?.contiguous()?;
-        let attn = candle_nn::ops::softmax(&q.matmul(&k.t()?)?, Minus1)?;
-        let attn = attn.matmul(&v)?.transpose(1, 2)?.reshape((b, n, c))?;
-        self.output.forward(&attn)
+            .forward(xs)
+            .reshape([b, n, 3, self.num_heads, c / self.num_heads])
+            .permute([2, 0, 3, 1, 4]);
+        let q = qkv.get(0) * self.scale;
+        let k = qkv.get(1);
+        let v = qkv.get(2);
+        let attn = q.matmul(&k.transpose(-2, -1)).softmax(-1, Kind::Float);
+        attn.matmul(&v).transpose(1, 2).reshape([b, n, c]).apply(&self.output)
     }
 }
 
 #[derive(Debug)]
 struct LayerScale {
-    lambda: Tensor,
+    lambda1: Tensor,
 }
 
 impl LayerScale {
-    fn new(vb: VarBuilder, dim: usize) -> Result<Self> {
-        let gamma = vb.get(dim, "lambda1")?;
-        Ok(Self { lambda: gamma })
+    fn new(vs: nn::Path, dim: i64) -> Self {
+        let lambda1 = vs.var("lambda1", &[dim], nn::Init::Const(0.));
+        Self { lambda1 }
     }
 }
 
-impl Module for LayerScale {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        xs.broadcast_mul(&self.lambda)
+impl nn::Module for LayerScale {
+    fn forward(&self, xs: &Tensor) -> Tensor {
+        xs * &self.lambda1
     }
 }
 
 #[derive(Debug)]
 struct Mlp {
-    fc1: Linear,
-    fc2: Linear,
+    fc1: nn::Linear,
+    fc2: nn::Linear,
 }
 
 impl Mlp {
-    fn new(vb: VarBuilder, in_features: usize, hidden_features: usize, bias: bool) -> Result<Self> {
+    fn new(vs: nn::Path, in_features: i64, hidden_features: i64, bias: bool) -> Self {
         let out_features = in_features;
-        let fc1 = linear(vb.pp("fc1"), in_features, hidden_features, bias)?;
-        let fc2 = linear(vb.pp("fc2"), hidden_features, out_features, bias)?;
-        Ok(Self { fc1, fc2 })
+        let config = nn::LinearConfig { bias, ..Default::default() };
+        let fc1 = nn::linear(&vs / "fc1", in_features, hidden_features, config);
+        let fc2 = nn::linear(&vs / "fc2", hidden_features, out_features, config);
+        Self { fc1, fc2 }
     }
 }
 
-impl Module for Mlp {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let xs = self.fc1.forward(xs)?.gelu()?;
-        self.fc2.forward(&xs)
+impl nn::Module for Mlp {
+    fn forward(&self, xs: &Tensor) -> Tensor {
+        xs.apply(&self.fc1).gelu("none").apply(&self.fc2)
     }
 }
 
 #[derive(Debug)]
 struct Block {
-    norm1: LayerNorm,
+    norm1: nn::LayerNorm,
     attn: Attention,
     ls1: LayerScale,
-    norm2: LayerNorm,
+    norm2: nn::LayerNorm,
     mlp: Mlp,
     ls2: LayerScale,
 }
 
 impl Block {
-    fn new(vb: VarBuilder, dim: usize, num_heads: usize) -> Result<Self> {
-        let norm1 = layer_norm(dim, 1e-5, vb.pp("norm1"))?;
-        let attn = Attention::new(vb.pp("attention"), dim, num_heads, true, true)?;
-        let ls1 = LayerScale::new(vb.pp("layer_scale1"), dim)?;
-        let norm2 = layer_norm(dim, 1e-5, vb.pp("norm2"))?;
-        let mlp = Mlp::new(vb.pp("mlp"), dim, dim * 4, true)?;
-        let ls2 = LayerScale::new(vb.pp("layer_scale2"), dim)?;
-        Ok(Self {
+    fn new(vs: nn::Path, dim: i64, num_heads: i64) -> Self {
+        let norm1 = nn::layer_norm(&vs / "norm1", vec![dim], Default::default());
+        let attn = Attention::new(&vs / "attention", dim, num_heads, true, true);
+        let ls1 = LayerScale::new(&vs / "layer_scale1", dim);
+        let norm2 = nn::layer_norm(&vs / "norm2", vec![dim], Default::default());
+        let mlp = Mlp::new(&vs / "mlp", dim, dim * 4, true);
+        let ls2 = LayerScale::new(&vs / "layer_scale2", dim);
+        Self {
             norm1,
             attn,
             ls1,
             norm2,
             mlp,
             ls2,
-        })
+        }
     }
 }
 
-impl Module for Block {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+impl nn::Module for Block {
+    fn forward(&self, xs: &Tensor) -> Tensor {
         let residual = xs;
         let xs = self
             .ls1
-            .forward(&self.attn.forward(&self.norm1.forward(xs)?)?)?;
-        let xs = (xs + residual)?;
+            .forward(&self.attn.forward(&self.norm1.forward(xs)));
+        let xs = xs + residual;
         let residual = &xs;
         let xs = self
             .ls2
-            .forward(&self.mlp.forward(&self.norm2.forward(&xs)?)?)?;
+            .forward(&self.mlp.forward(&self.norm2.forward(&xs)));
         xs + residual
     }
 }
 
 #[derive(Debug)]
 struct PatchEmbed {
-    proj: candle_nn::Conv2d,
-    patch_size: (usize, usize),
-    num_patches: usize,
+    proj: nn::Conv2D,
+    patch_size: (i64, i64),
+    num_patches: i64,
 }
 
 impl PatchEmbed {
     fn new(
-        vb: VarBuilder,
-        img_size: usize,
-        patch_size: usize,
-        in_chans: usize,
-        embed_dim: usize,
-    ) -> Result<Self> {
-        let config = candle_nn::Conv2dConfig {
-            stride: patch_size,
-            ..Default::default()
-        };
-        let proj = candle_nn::conv2d(in_chans, embed_dim, patch_size, config, vb.pp("projection"))?;
+        vs: nn::Path,
+        img_size: i64,
+        patch_size: i64,
+        in_chans: i64,
+        embed_dim: i64,
+    ) -> Self {
+        let config = nn::ConvConfig { stride: patch_size, ..Default::default() };
+        let proj = nn::conv2d(&vs / "projection", in_chans, embed_dim, patch_size, config);
         let num_patches = (img_size / patch_size) * (img_size / patch_size);
-        Ok(Self {
+        Self {
             proj,
             patch_size: (patch_size, patch_size),
             num_patches,
-        })
+        }
     }
 }
 
-impl Module for PatchEmbed {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let (_b, _c, h, w) = xs.dims4()?;
+impl nn::Module for PatchEmbed {
+    fn forward(&self, xs: &Tensor) -> Tensor {
+        let (_b, _c, h, w) = xs.size4().unwrap();
         let (patch_h, patch_w) = self.patch_size;
         if (h % patch_h) != 0 {
-            candle_core::bail!("image height {h} is not a multiple of patch height {patch_h}")
+            panic!("image height {h} is not a multiple of patch height {patch_h}")
         }
         if (w % patch_w) != 0 {
-            candle_core::bail!("image width {w} is not a multiple of patch width {patch_w}")
+            panic!("image width {w} is not a multiple of patch width {patch_w}")
         }
-        let xs = self.proj.forward(xs)?;
-        let (b, c, h, w) = xs.dims4()?;
+        let xs = self.proj.forward(xs);
+        let (b, c, h, w) = xs.size4().unwrap();
         // flatten embeddings.
-        xs.reshape((b, c, h * w))?.transpose(1, 2)
+        xs.reshape([b, c, h * w]).transpose(1, 2)
     }
 }
 
@@ -216,181 +204,98 @@ pub struct DinoVisionTransformer {
     cls_token: Tensor,
     pos_embed: Tensor,
     blocks: Vec<Block>,
-    norm: LayerNorm,
-    head: Option<Linear>,
+    norm: nn::LayerNorm,
+    head: Option<nn::Linear>,
 }
 
 impl DinoVisionTransformer {
     pub fn new(
-        vb: VarBuilder,
-        vb_head: Option<VarBuilder>,
-        depth: usize,
-        embed_dim: usize,
-        num_heads: usize,
-    ) -> Result<Self> {
-        let vb_embeddings = vb.pp("embeddings");
+        vs: nn::Path,
+        vs_head: Option<nn::Path>,
+        depth: i64,
+        embed_dim: i64,
+        num_heads: i64,
+    ) -> Self {
+        let vs_embeddings = &vs / "embeddings";
         let patch_embed = PatchEmbed::new(
-            vb_embeddings.pp("patch_embeddings"),
+            &vs_embeddings / "patch_embeddings",
             IMG_SIZE,
             PATCH_SIZE,
             3,
             embed_dim,
-        )?;
-        let cls_token = vb_embeddings.get((1, 1, embed_dim), "cls_token")?;
+        );
+        let cls_token = vs_embeddings.var("cls_token", &[1, 1, embed_dim], nn::Init::Const(0.));
         let num_tokens = 1;
-        let pos_embed = vb_embeddings.get(
-            (1, patch_embed.num_patches + num_tokens, embed_dim),
+        let pos_embed = vs_embeddings.var(
             "position_embeddings",
-        )?;
-        let head = match vb_head {
-            Some(vb_head) => Some(linear(vb_head, 2 * embed_dim, NUM_CLASSES, true)?),
+            &[1, patch_embed.num_patches + num_tokens, embed_dim],
+            nn::Init::Const(0.),
+        );
+        let head = match vs_head {
+            Some(vs_head) => Some(nn::linear(vs_head, 2 * embed_dim, NUM_CLASSES, Default::default())),
             None => None,
         };
-        let norm = layer_norm(embed_dim, 1e-5, vb.pp("layernorm"))?;
-        let vb_layer = vb.pp("encoder").pp("layer");
+        let norm = nn::layer_norm(&vs / "layernorm", vec![embed_dim], Default::default());
+        let vs_layer = &vs / "encoder" / "layer";
         let blocks = (0..depth)
-            .map(|i| Block::new(vb_layer.pp(&i.to_string()), embed_dim, num_heads))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self {
+            .map(|i| Block::new(&vs_layer / i.to_string(), embed_dim, num_heads))
+            .collect();
+        Self {
             patch_embed,
             cls_token,
             pos_embed,
             blocks,
             norm,
             head,
-        })
+        }
     }
 
-    fn interpolate_pos_encoding(&self, xs: &Tensor, w: usize, h: usize) -> Result<Tensor> {
-        let npatch = xs.dim(1)? - 1;
-        let n = self.pos_embed.dim(1)? - 1;
+    fn interpolate_pos_encoding(&self, xs: &Tensor, w: i64, h: i64) -> Tensor {
+        let npatch = xs.size()[1] - 1;
+        let n = self.pos_embed.size()[1] - 1;
         let sqrt_n = (n as f64).sqrt();
         if npatch == n && w == h {
-            return Ok(xs.clone());
+            return xs.shallow_clone();
         }
-        let class_pos_embed = self.pos_embed.i((.., ..1))?;
-        let patch_pos_embed = self.pos_embed.i((.., 1..))?;
-        let dim = xs.dim(D::Minus1)?;
+        let class_pos_embed = self.pos_embed.i((.., ..1));
+        let patch_pos_embed = self.pos_embed.i((.., 1..));
+        let dim = *xs.size().last().unwrap();
         let (w0, h0) = ((w / PATCH_SIZE) as f64 + 0.1, (h / PATCH_SIZE) as f64 + 0.1);
         let patch_pos_embed = patch_pos_embed
-            .reshape((1, sqrt_n as usize, sqrt_n as usize, dim))?
-            .transpose(2, 3)?
-            .transpose(1, 2)?;
-        // This uses bicubic interpolation in the original implementation.
-        let patch_pos_embed = patch_pos_embed.upsample_nearest2d(h0 as usize, w0 as usize)?;
-        let el_count = patch_pos_embed.shape().elem_count();
-        let patch_pos_embed =
-            patch_pos_embed
-                .transpose(1, 2)?
-                .transpose(2, 3)?
-                .reshape((1, el_count / dim, dim))?;
+            .reshape([1, sqrt_n as i64, sqrt_n as i64, dim])
+            .permute([0, 3, 1, 2])
+            .upsample_bicubic2d([w0 as i64, h0 as i64], false, w0 / sqrt_n, h0 / sqrt_n)
+            .permute([0, 2, 3, 1])
+            .reshape([1, -1, dim]);
         Tensor::cat(&[&class_pos_embed, &patch_pos_embed], 1)
     }
 
-    fn prepare_tokens_with_mask(&self, xs: &Tensor) -> Result<Tensor> {
-        let (_b, _nc, w, h) = xs.dims4()?;
-        let xs = self.patch_embed.forward(xs)?;
-        let xs = Tensor::cat(&[&self.cls_token, &xs], 1)?;
-        &xs + &self.interpolate_pos_encoding(&xs, w, h)?
-    }
-
-    fn get_intermediate_layers_not_chunked(
-        &self,
-        xs: &Tensor,
-        blocks_to_take: &[usize],
-    ) -> Result<Vec<Tensor>> {
-        let mut xs = self.prepare_tokens_with_mask(xs)?;
-        let mut output = Vec::new();
-        for (i, blk) in self.blocks.iter().enumerate() {
-            xs = blk.forward(&xs)?;
-            if blocks_to_take.contains(&i) {
-                output.push(xs.clone());
-            }
-        }
-        if output.len() != blocks_to_take.len() {
-            candle_core::bail!(
-                "only {} / {} blocks found",
-                output.len(),
-                blocks_to_take.len()
-            );
-        }
-        Ok(output)
-    }
-
-    pub fn get_intermediate_layers(
-        &self,
-        xs: &Tensor,
-        blocks_to_take: &[usize],
-        reshape: bool,
-        return_class_token: bool,
-        norm: bool,
-    ) -> Result<Tensor> {
-        let outputs = self.get_intermediate_layers_not_chunked(xs, blocks_to_take)?;
-        let outputs = if norm {
-            outputs
-                .iter()
-                .map(|out| self.norm.forward(out))
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            outputs
-        };
-        let class_tokens = outputs
-            .iter()
-            .map(|out| out.i((.., 0)))
-            .collect::<Result<Vec<_>>>()?;
-        let outputs = outputs
-            .iter()
-            .map(|out| out.i((.., 1..)))
-            .collect::<Result<Vec<_>>>()?;
-
-        let outputs = if reshape {
-            let (b, _c, w, h) = xs.dims4()?;
-            let patch_size = self.patch_embed.patch_size.0;
-            let num_channels = outputs[0].elem_count() / (b * (w / patch_size) * (h / patch_size));
-            outputs
-                .iter()
-                .map(|out| {
-                    out.reshape((b, w / patch_size, h / patch_size, num_channels))?
-                        .transpose(2, 3)?
-                        .transpose(1, 2)
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            outputs
-        };
-
-        let outputs = if return_class_token {
-            outputs
-                .iter()
-                .zip(class_tokens.iter())
-                .map(|(out, class_token)| Tensor::cat(&[out, class_token], D::Minus1))
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            outputs
-        };
-
-        Tensor::stack(&outputs[..], 0)
+    fn prepare_tokens_with_mask(&self, xs: &Tensor) -> Tensor {
+        let (_b, _nc, w, h) = xs.size4().unwrap();
+        let xs = self.patch_embed.forward(xs);
+        let xs = Tensor::cat(&[&self.cls_token, &xs], 1);
+        &xs + &self.interpolate_pos_encoding(&xs, w, h)
     }
 }
 
-impl Module for DinoVisionTransformer {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let mut xs = self.prepare_tokens_with_mask(xs)?;
+impl nn::Module for DinoVisionTransformer {
+    fn forward(&self, xs: &Tensor) -> Tensor {
+        let mut xs = self.prepare_tokens_with_mask(xs);
         for blk in self.blocks.iter() {
-            xs = blk.forward(&xs)?
+            xs = blk.forward(&xs);
         }
-        let xs = self.norm.forward(&xs)?;
-        let xs_norm_clstoken = xs.i((.., 0))?;
-        let xs_norm_patchtokens = xs.i((.., 1..))?.mean(1)?;
-        let xs = Tensor::cat(&[xs_norm_clstoken, xs_norm_patchtokens], D::Minus1)?;
+        let xs = self.norm.forward(&xs);
+        let xs_norm_clstoken = xs.i((.., 0));
+        let xs_norm_patchtokens = xs.i((.., 1..)).mean_dim(1, false, None);
+        let xs = Tensor::concat(&[xs_norm_clstoken, xs_norm_patchtokens], -1);
 
         match &self.head {
             Some(head) => head.forward(&xs),
-            None => Ok(xs),
+            None => xs,
         }
     }
 }
 
-pub fn vit_base(vb: VarBuilder, vb_head: Option<VarBuilder>) -> Result<DinoVisionTransformer> {
-    DinoVisionTransformer::new(vb, vb_head, 12, 768, 12)
+pub fn vit_base(vs: nn::Path, vs_head: Option<nn::Path>) -> DinoVisionTransformer {
+    DinoVisionTransformer::new(vs, vs_head, 12, 768, 12)
 }

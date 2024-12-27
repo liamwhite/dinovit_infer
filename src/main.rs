@@ -1,13 +1,9 @@
-use std::error::Error;
 
-use candle_core::{Device, DType, Module};
-use candle_nn::VarBuilder;
 use clap::Parser;
-
-mod imagenet;
+use std::{error::Error, time::Instant};
+use tch::{nn::Module, vision::imagenet};
 
 mod dinov2;
-mod dinov2reg4;
 
 #[derive(Parser)]
 struct Args {
@@ -20,20 +16,21 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    let device = Device::Cpu;
-
-    infer(&args, device).unwrap();
+    infer(&args).unwrap();
 }
 
-fn infer(args: &Args, device: Device) -> Result<(), Box<dyn Error>> {
-    let image = imagenet::load_image224(&args.image)?.to_device(&device)?;
-    println!("loaded image {image:?}");
+fn infer(args: &Args) -> Result<(), Box<dyn Error>> {
+    let image = imagenet::load_image_and_resize(&args.image, dinov2::IMG_SIZE, dinov2::IMG_SIZE)?;
+    let mut vs = tch::nn::VarStore::new(tch::Device::Cpu);
+    let net = Box::new(dinov2::vit_base(vs.root(), None));
+    vs.load(&args.model)?;
 
-    let model_file = core::slice::from_ref(&args.model);
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(model_file, DType::F32, &device)? };
-    let model = dinov2::vit_base(vb, None)?;
-    let logits = model.forward(&image.unsqueeze(0)?)?;
-    println!("logits {logits:?}");
+    let begin = Instant::now();
+    let output = net.forward(&image.unsqueeze(0));
+    let end = Instant::now();
+    let duration = (end - begin).as_secs_f64();
+
+    println!("Evaluated in {duration} seconds {output:?}");
 
     Ok(())
 }
