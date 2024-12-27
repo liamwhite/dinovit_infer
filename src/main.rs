@@ -2,10 +2,10 @@ use std::error::Error;
 
 use candle_core::{Device, DType, Module};
 use candle_nn::VarBuilder;
-use candle_transformers::models::dinov2reg4;
 use clap::Parser;
 
 mod imagenet;
+mod dinov2reg4;
 
 #[derive(Parser)]
 struct Args {
