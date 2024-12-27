@@ -19,7 +19,7 @@ const PATCH_SIZE: usize = 14;
 #[derive(Debug)]
 struct Attention {
     qkv: Linear,
-    proj: Linear,
+    output: Linear,
     num_heads: usize,
     scale: f64,
 }
@@ -32,15 +32,29 @@ impl Attention {
         qkv_bias: bool,
         proj_bias: bool,
     ) -> Result<Self> {
-        /*let query = linear(vb.pp("query"), dim, dim, qkv_bias)?;
-        let key = linear(vb.pp("key"), dim, dim, qkv_bias)?;
-        let value = linear(vb.pp("value"), dim, dim, qkv_bias)?;*/
-        let qkv = linear_b(dim, dim * 3, qkv_bias, vb.pp("qkv"))?;
-        let proj = linear_b(dim, dim, proj_bias, vb.pp("proj"))?;
+        let attn = vb.pp("attention");
+        let query = linear_b(dim, dim, qkv_bias, attn.pp("query"))?;
+        let key = linear_b(dim, dim, qkv_bias, attn.pp("key"))?;
+        let value = linear_b(dim, dim, qkv_bias, attn.pp("value"))?;
+        let qkv_weight = Tensor::cat(&[query.weight(), key.weight(), value.weight()], 0)?;
+        let qkv_bias = if qkv_bias {
+            Some(Tensor::cat(
+                &[
+                    query.bias().unwrap(),
+                    key.bias().unwrap(),
+                    value.bias().unwrap(),
+                ],
+                0,
+            )?)
+        } else {
+            None
+        };
+        let qkv = Linear::new(qkv_weight, qkv_bias);
+        let output = linear_b(dim, dim, proj_bias, vb.pp("output").pp("dense"))?;
         let scale = 1. / ((dim / num_heads) as f64).sqrt();
         Ok(Self {
             qkv,
-            proj,
+            output,
             num_heads,
             scale,
         })
@@ -62,25 +76,25 @@ impl Module for Attention {
         let v = qkv.i(2)?.contiguous()?;
         let attn = candle_nn::ops::softmax(&q.matmul(&k.t()?)?, D::Minus1)?;
         let attn = attn.matmul(&v)?.transpose(1, 2)?.reshape((b, n, c))?;
-        self.proj.forward(&attn)
+        self.output.forward(&attn)
     }
 }
 
 #[derive(Debug)]
 struct LayerScale {
-    gamma: Tensor,
+    lambda1: Tensor,
 }
 
 impl LayerScale {
     fn new(vb: VarBuilder, dim: usize) -> Result<Self> {
-        let gamma = vb.get(dim, "gamma")?;
-        Ok(Self { gamma })
+        let lambda1 = vb.get(dim, "lambda1")?;
+        Ok(Self { lambda1 })
     }
 }
 
 impl Module for LayerScale {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        xs.broadcast_mul(&self.gamma)
+        xs.broadcast_mul(&self.lambda1)
     }
 }
 
@@ -120,10 +134,10 @@ impl Block {
     fn new(vb: VarBuilder, dim: usize, num_heads: usize) -> Result<Self> {
         let norm1 = layer_norm(dim, 1e-6, vb.pp("norm1"))?;
         let attn = Attention::new(vb.pp("attention"), dim, num_heads, true, true)?;
-        let ls1 = LayerScale::new(vb.pp("ls1"), dim)?;
+        let ls1 = LayerScale::new(vb.pp("layer_scale1"), dim)?;
         let norm2 = layer_norm(dim, 1e-6, vb.pp("norm2"))?;
         let mlp = Mlp::new(vb.pp("mlp"), dim, dim * 4, true)?;
-        let ls2 = LayerScale::new(vb.pp("ls2"), dim)?;
+        let ls2 = LayerScale::new(vb.pp("layer_scale2"), dim)?;
         Ok(Self {
             norm1,
             attn,
@@ -213,7 +227,8 @@ impl DinoVisionTransformer {
             PatchEmbed::new(vbe.pp("patch_embeddings"), IMG_SIZE, PATCH_SIZE, 3, embed_dim)?;
         let cls_token = vbe.get((1, 1, embed_dim), "cls_token")?;
         let reg_token = vbe.get((1, 4, embed_dim), "register_tokens")?;
-        let pos_embed = vbe.get((1, patch_embed.num_patches + 1, embed_dim), "position_embeddings")?;
+        let num_tokens = 1;
+        let pos_embed = vbe.get((1, patch_embed.num_patches + num_tokens, embed_dim), "position_embeddings")?;
         let norm = layer_norm(embed_dim, 1e-6, vb.pp("layernorm"))?;
         let vb_b = vb.pp("encoder.layer");
         let blocks = (0..depth)
@@ -236,7 +251,7 @@ impl DinoVisionTransformer {
         if npatch == n && w == h {
             return Ok(self.pos_embed.clone());
         }
-        let patch_pos_embed = &self.pos_embed;
+        let patch_pos_embed = self.pos_embed.i((.., 1..))?;
         let dim = xs.dim(D::Minus1)?;
         let (w0, h0) = ((w / PATCH_SIZE) as f64 + 0.1, (h / PATCH_SIZE) as f64 + 0.1);
         let patch_pos_embed = patch_pos_embed
