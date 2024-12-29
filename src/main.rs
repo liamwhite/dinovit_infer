@@ -1,14 +1,13 @@
 
 use clap::Parser;
 use std::{error::Error, time::Instant};
-use tch::{nn::Module, vision::imagenet};
-
-mod dinov2;
+use tch::vision::imagenet;
+use tch::jit::{CModule, IValue};
 
 #[derive(Parser)]
 struct Args {
     #[arg(long)]
-    model: String,
+    pytorch_jit_model: String,
 
     #[arg(long)]
     image: String,
@@ -23,12 +22,10 @@ fn infer(args: &Args) -> Result<(), Box<dyn Error>> {
     tch::set_num_threads(4);
 
     let image = imagenet::load_image_and_resize(&args.image, 224, 224)?;
-    let mut vs = tch::nn::VarStore::new(tch::Device::Cpu);
-    let net = Box::new(dinov2::vit_base(vs.root(), None));
-    vs.load(&args.model)?;
+    let model = CModule::load(&args.pytorch_jit_model)?;
 
     let begin = Instant::now();
-    let output = net.forward(&image.unsqueeze(0));
+    let output = model.forward_is(&[IValue::Tensor(image.unsqueeze(0))])?;
     let end = Instant::now();
     let duration = (end - begin).as_secs_f64();
 
