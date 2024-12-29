@@ -142,16 +142,8 @@ impl Block {
 
 impl nn::Module for Block {
     fn forward(&self, xs: &Tensor) -> Tensor {
-        let residual = xs;
-        let xs = self
-            .ls1
-            .forward(&self.attn.forward(&self.norm1.forward(xs)));
-        let xs = xs + residual;
-        let residual = &xs;
-        let xs = self
-            .ls2
-            .forward(&self.mlp.forward(&self.norm2.forward(&xs)));
-        xs + residual
+        let xs = xs + xs.apply(&self.norm1).apply(&self.attn).apply(&self.ls1);
+        &xs + xs.apply(&self.norm2).apply(&self.mlp).apply(&self.ls2)
     }
 }
 

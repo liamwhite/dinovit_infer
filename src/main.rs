@@ -20,7 +20,9 @@ fn main() {
 }
 
 fn infer(args: &Args) -> Result<(), Box<dyn Error>> {
-    let image = imagenet::load_image_and_resize(&args.image, dinov2::IMG_SIZE, dinov2::IMG_SIZE)?;
+    tch::set_num_threads(4);
+
+    let image = imagenet::load_image_and_resize(&args.image, 224, 224)?;
     let mut vs = tch::nn::VarStore::new(tch::Device::Cpu);
     let net = Box::new(dinov2::vit_base(vs.root(), None));
     vs.load(&args.model)?;
