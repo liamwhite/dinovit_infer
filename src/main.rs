@@ -32,7 +32,7 @@ fn into_tensor<P: Pixel<Subpixel = f32>>(image: ImageBuffer<P, Vec<f32>>) -> Ten
         Tensor::from_slice(&pixels)
     };
 
-    pixels.reshape([h, w, c])
+    pixels.reshape([h, w, c]).permute([2, 0, 1])
 }
 
 fn strip_transparency(image: DynamicImage) -> Result<Tensor, Box<dyn Error>> {
@@ -53,8 +53,8 @@ fn strip_transparency(image: DynamicImage) -> Result<Tensor, Box<dyn Error>> {
     // Get channels
     let (alpha, color) = {
         let pixels = into_tensor(image.into_rgba32f());
-        let alpha = pixels.slice(2, 3, 4, 1).broadcast_to([h, w, 3]);
-        let color = pixels.slice(2, 0, 3, 1);
+        let alpha = pixels.slice(0, 3, 4, 1).broadcast_to([3, h, w]);
+        let color = pixels.slice(0, 0, 3, 1);
 
         (alpha, color)
     };
@@ -91,7 +91,7 @@ fn resize_tensor(image: Tensor, width: i64, height: i64) -> Tensor {
 
 fn load_image(path: &str) -> Result<Tensor, Box<dyn Error>> {
     let image = ImageReader::open(path)?.with_guessed_format()?.decode()?;
-    let image = strip_transparency(image)?.permute([2, 0, 1]).unsqueeze(0);
+    let image = strip_transparency(image)?.unsqueeze(0);
     let image = resize_tensor(image, 224, 224);
 
     Ok(image)
