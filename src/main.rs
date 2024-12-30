@@ -138,15 +138,20 @@ fn infer(args: &Args) -> Result<(), Box<dyn Error>> {
     };
 
     let infer_result = last_hidden_state.mean_dim(1, false, None).squeeze();
-    // let scaled_norm = infer_result.norm().pow_tensor_scalar(-1).multiply_scalar(128);
-    // let infer_result = infer_result.multiply(&scaled_norm).to_dtype(tch::Kind::Int8, false, true);
+    let scaled_norm = infer_result
+        .norm()
+        .pow_tensor_scalar(-1)
+        .multiply_scalar(128);
+    let infer_result = infer_result
+        .multiply(&scaled_norm)
+        .to_dtype(tch::Kind::Int8, false, true);
 
     let Ok(768) = infer_result.size1() else {
         return Err("last_hidden_state size is not 768".into());
     };
 
     for i in 0..768 {
-        print!("{} ", infer_result.double_value(&[i]));
+        print!("{} ", infer_result.int64_value(&[i]));
     }
     println!("");
 
