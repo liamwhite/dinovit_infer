@@ -1,6 +1,7 @@
 use clap::Parser;
-use image::{DynamicImage, ImageReader};
+use image::{DynamicImage, ImageReader, RgbImage};
 use image::{ImageBuffer, Pixel};
+use smallvec::SmallVec;
 use std::error::Error;
 use tch::jit::{CModule, IValue};
 use tch::Tensor;
@@ -31,7 +32,7 @@ fn into_tensor<P: Pixel<Subpixel = f32>>(image: ImageBuffer<P, Vec<f32>>) -> Ten
         Tensor::from_slice(&pixels)
     };
 
-    pixels.reshape([w, h, c])
+    pixels.reshape([h, w, c])
 }
 
 fn strip_transparency(image: DynamicImage) -> Result<Tensor, Box<dyn Error>> {
@@ -52,7 +53,7 @@ fn strip_transparency(image: DynamicImage) -> Result<Tensor, Box<dyn Error>> {
     // Get channels
     let (alpha, color) = {
         let pixels = into_tensor(image.into_rgba32f());
-        let alpha = pixels.slice(2, 3, 4, 1).broadcast_to([w, h, 3]);
+        let alpha = pixels.slice(2, 3, 4, 1).broadcast_to([h, w, 3]);
         let color = pixels.slice(2, 0, 3, 1);
 
         (alpha, color)
@@ -68,6 +69,7 @@ fn strip_transparency(image: DynamicImage) -> Result<Tensor, Box<dyn Error>> {
         .gt_tensor(&alpha)
         .sum(tch::Kind::Int64)
         .int64_value(&[]);
+
     let color = if threshold_count > 0 {
         color.multiply(&alpha)
     } else {
@@ -93,6 +95,30 @@ fn load_image(path: &str) -> Result<Tensor, Box<dyn Error>> {
     let image = resize_tensor(image, 224, 224);
 
     Ok(image)
+}
+
+#[allow(dead_code)]
+fn save_image(path: &str, image: &Tensor) -> Result<(), Box<dyn Error>> {
+    let image = image
+        .squeeze()
+        .multiply_scalar(255.0)
+        .clamp(0.0, 255.0)
+        .to_kind(tch::Kind::Uint8);
+
+    let (c, h, w) = image.size3()?;
+    let mut output_image = RgbImage::new(w as u32, h as u32);
+
+    for y in 0..h {
+        for x in 0..w {
+            let values: SmallVec<[u8; 4]> = (0..c)
+                .map(|z| image.int64_value(&[z, y, x]) as u8)
+                .collect();
+
+            output_image.put_pixel(x as u32, y as u32, *Pixel::from_slice(&values));
+        }
+    }
+
+    Ok(output_image.save(path)?)
 }
 
 fn infer(args: &Args) -> Result<(), Box<dyn Error>> {

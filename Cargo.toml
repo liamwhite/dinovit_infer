@@ -7,3 +7,4 @@ edition = "2021"
 clap = { version = "4.5.23", features = ["derive"] }
 image = { version = "0.25.2", default-features = false, features = ["jpeg", "png"] }
 tch = { version = "0.18.1", features = ["download-libtorch"] }
+smallvec = { version = "1.13", features = ["const_generics"] }
