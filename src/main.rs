@@ -151,10 +151,11 @@ fn into_principal_components(data: &Tensor, q: i64) -> Result<Tensor, Box<dyn Er
 #[allow(dead_code)]
 fn visualize_attention(
     last_hidden_state: &Tensor,
+    num_patches: i64,
     size: (i64, i64),
 ) -> Result<Tensor, Box<dyn Error>> {
     // discard CLS token, we just want patch embeddings
-    let a = last_hidden_state.slice(1, 1, None, 1).squeeze();
+    let a = last_hidden_state.slice(1, 1, num_patches + 1, 1).squeeze();
     let pc = into_principal_components(&a, 3)?;
 
     // normalize
@@ -177,7 +178,7 @@ fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
     println!("{}", scaled_result(&pooler_output.squeeze()).to_string(80)?);
     save_image(
         "/tmp/attention.png",
-        &visualize_attention(&last_hidden_state, (16, 16))?,
+        &visualize_attention(&last_hidden_state, 256, (16, 16))?,
     )?;
 
     Ok(())
