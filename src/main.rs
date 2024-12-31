@@ -151,9 +151,9 @@ fn scaled_result(pooler_output: &Tensor) -> Tensor {
 fn into_principal_components(data: &Tensor, q: i64) -> Result<Tensor, Box<dyn Error>> {
     let mean = data.mean_dim(0, false, None);
     let centered_data = data.f_sub(&mean)?;
-    let (_u, _s, v) = centered_data.svd(true, false);
+    let (_u, _s, v) = centered_data.svd(true, true);
 
-    Ok(data.matmul(&v.slice(1, 0, q, 1)))
+    Ok(centered_data.matmul(&v.slice(1, 0, q, 1)))
 }
 
 fn visualize_attention(
