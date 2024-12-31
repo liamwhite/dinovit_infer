@@ -116,11 +116,8 @@ fn save_image(path: &str, image: &Tensor) -> Result<(), Box<dyn Error>> {
     Ok(output_image.save(path)?)
 }
 
-fn infer(args: &Args, size: (i64, i64)) -> Result<(Tensor, Tensor), Box<dyn Error>> {
-    let image = load_image(&args.image, size)?;
-    let model = CModule::load(&args.pytorch_jit_model)?;
+fn infer(image: Tensor, model: &CModule) -> Result<(Tensor, Tensor), Box<dyn Error>> {
     let output = model.forward_is(&[IValue::Tensor(image)])?;
-
     let mut results = match output {
         IValue::Tuple(elements) if elements.len() == 2 => elements,
         _ => return Err("expected (last_hidden_state, pooler_output)".into()),
@@ -148,6 +145,7 @@ fn scaled_result(pooler_output: &Tensor) -> Tensor {
         .to_kind(tch::Kind::Int8)
 }
 
+#[allow(dead_code)]
 fn into_principal_components(data: &Tensor, q: i64) -> Result<Tensor, Box<dyn Error>> {
     let mean = data.mean_dim(0, false, None);
     let centered_data = data.f_sub(&mean)?;
@@ -156,6 +154,7 @@ fn into_principal_components(data: &Tensor, q: i64) -> Result<Tensor, Box<dyn Er
     Ok(centered_data.matmul(&v.slice(1, 0, q, 1)))
 }
 
+#[allow(dead_code)]
 fn visualize_attention(
     last_hidden_state: &Tensor,
     size: (i64, i64),
@@ -174,16 +173,13 @@ fn visualize_attention(
     Ok(pc.reshape([size.0, size.1, 3]).permute([2, 0, 1]))
 }
 
-fn main() {
-    let args = Args::parse();
-    tch::set_num_threads(4);
-    tch::no_grad(|| console_evaluate(&args).unwrap());
-}
-
 fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
+    let image = load_image(&args.image, (224, 224))?;
+    let model = CModule::load(&args.pytorch_jit_model)?;
+
     // TODO: evaluate what subset of features give good "similarity" results
     // Do we just want to evaluate the CLS token, or all of the patch tokens as well?
-    let (last_hidden_state, pooler_output) = infer(&args, (224, 224))?;
+    let (last_hidden_state, pooler_output) = infer(image, &model)?;
     println!("{}", scaled_result(&pooler_output.squeeze()).to_string(80)?);
     save_image(
         "/tmp/attention.png",
@@ -191,4 +187,10 @@ fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
     )?;
 
     Ok(())
+}
+
+fn main() {
+    let args = Args::parse();
+    tch::set_num_threads(4);
+    tch::no_grad(|| console_evaluate(&args).unwrap());
 }
