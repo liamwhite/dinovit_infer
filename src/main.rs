@@ -134,15 +134,9 @@ fn infer(image: Tensor, model: &CModule) -> Result<(Tensor, Tensor), Box<dyn Err
 }
 
 fn scaled_result(pooler_output: &Tensor) -> Tensor {
-    let scaled_norm = pooler_output
-        .norm()
-        .pow_tensor_scalar(-1)
-        .multiply_scalar(128.0);
+    let scaled_norm = pooler_output.norm().pow_tensor_scalar(-1);
 
-    pooler_output
-        .multiply(&scaled_norm)
-        .clamp(-128.0, 127.0)
-        .to_kind(tch::Kind::Int8)
+    pooler_output.multiply(&scaled_norm)
 }
 
 #[allow(dead_code)]
