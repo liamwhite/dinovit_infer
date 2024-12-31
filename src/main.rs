@@ -15,11 +15,6 @@ struct Args {
     image: String,
 }
 
-fn main() {
-    let args = Args::parse();
-    infer(&args).unwrap();
-}
-
 fn into_tensor<P: Pixel<Subpixel = f32>>(image: ImageBuffer<P, Vec<f32>>) -> Tensor {
     let w: i64 = image.width().into();
     let h: i64 = image.height().into();
@@ -85,14 +80,14 @@ fn strip_transparency(image: DynamicImage) -> Result<Tensor, Box<dyn Error>> {
         .f_add(&alpha.multiply_scalar(ALPHA_LEVEL))?)
 }
 
-fn resize_tensor(image: Tensor, width: i64, height: i64) -> Tensor {
-    image.upsample_bicubic2d([width, height], true, None, None)
+fn resize_tensor(image: Tensor, size: (i64, i64)) -> Tensor {
+    image.upsample_bicubic2d([size.0, size.1], true, None, None)
 }
 
-fn load_image(path: &str) -> Result<Tensor, Box<dyn Error>> {
+fn load_image(path: &str, size: (i64, i64)) -> Result<Tensor, Box<dyn Error>> {
     let image = ImageReader::open(path)?.with_guessed_format()?.decode()?;
     let image = strip_transparency(image)?.unsqueeze(0);
-    let image = resize_tensor(image, 224, 224);
+    let image = resize_tensor(image, size);
 
     Ok(image)
 }
@@ -121,39 +116,79 @@ fn save_image(path: &str, image: &Tensor) -> Result<(), Box<dyn Error>> {
     Ok(output_image.save(path)?)
 }
 
-fn infer(args: &Args) -> Result<(), Box<dyn Error>> {
-    tch::set_num_threads(4);
-
-    let image = load_image(&args.image)?;
+fn infer(args: &Args, size: (i64, i64)) -> Result<(Tensor, Tensor), Box<dyn Error>> {
+    let image = load_image(&args.image, size)?;
     let model = CModule::load(&args.pytorch_jit_model)?;
     let output = model.forward_is(&[IValue::Tensor(image)])?;
 
-    let results = match output {
+    let mut results = match output {
         IValue::Tuple(elements) if elements.len() == 2 => elements,
         _ => return Err("expected (last_hidden_state, pooler_output)".into()),
     };
 
-    let IValue::Tensor(last_hidden_state) = &results[0] else {
-        return Err("expected first tuple element to be a tensor".into());
-    };
+    let mut results = results.drain(..);
 
-    let infer_result = last_hidden_state.mean_dim(1, false, None).squeeze();
-    let scaled_norm = infer_result
+    match (results.next(), results.next()) {
+        (Some(IValue::Tensor(last_hidden_state)), Some(IValue::Tensor(pooler_output))) => {
+            Ok((last_hidden_state, pooler_output))
+        }
+        _ => Err("expected 2-tuple of tensors".into()),
+    }
+}
+
+fn scaled_result(pooler_output: &Tensor) -> Tensor {
+    let scaled_norm = pooler_output
         .norm()
         .pow_tensor_scalar(-1)
-        .multiply_scalar(128);
-    let infer_result = infer_result
+        .multiply_scalar(128.0);
+
+    pooler_output
         .multiply(&scaled_norm)
-        .to_dtype(tch::Kind::Int8, false, true);
+        .clamp(-128.0, 127.0)
+        .to_kind(tch::Kind::Int8)
+}
 
-    let Ok(768) = infer_result.size1() else {
-        return Err("last_hidden_state size is not 768".into());
-    };
+fn into_principal_components(data: &Tensor, q: i64) -> Result<Tensor, Box<dyn Error>> {
+    let mean = data.mean_dim(0, false, None);
+    let centered_data = data.f_sub(&mean)?;
+    let (_u, _s, v) = centered_data.svd(true, false);
 
-    for i in 0..768 {
-        print!("{} ", infer_result.int64_value(&[i]));
-    }
-    println!("");
+    Ok(data.matmul(&v.slice(1, 0, q, 1)))
+}
+
+fn visualize_attention(
+    last_hidden_state: &Tensor,
+    size: (i64, i64),
+) -> Result<Tensor, Box<dyn Error>> {
+    // discard CLS token, we just want patch embeddings
+    let a = last_hidden_state.slice(1, 1, None, 1).squeeze();
+    let pc = into_principal_components(&a, 3)?;
+
+    // normalize
+    let max = pc.max_dim(0, false).0;
+    let min = pc.min_dim(0, false).0;
+    let range = max.f_sub(&min)?;
+    let pc = pc.f_sub(&min)?.f_div(&range)?;
+
+    // arrange into input shape and put channels first
+    Ok(pc.reshape([size.0, size.1, 3]).permute([2, 0, 1]))
+}
+
+fn main() {
+    let args = Args::parse();
+    tch::set_num_threads(4);
+    tch::no_grad(|| console_evaluate(&args).unwrap());
+}
+
+fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
+    // TODO: evaluate what subset of features give good "similarity" results
+    // Do we just want to evaluate the CLS token, or all of the patch tokens as well?
+    let (last_hidden_state, pooler_output) = infer(&args, (224, 224))?;
+    println!("{}", scaled_result(&pooler_output.squeeze()).to_string(80)?);
+    save_image(
+        "/tmp/attention.png",
+        &visualize_attention(&last_hidden_state, (16, 16))?,
+    )?;
 
     Ok(())
 }
