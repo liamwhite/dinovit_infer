@@ -60,16 +60,11 @@ fn strip_transparency(image: DynamicImage) -> Result<Tensor, Box<dyn Error>> {
     // Note that the only input format which we can get where this would
     // be relevant, PNG, explicitly says it does not carry premultiplied alpha,
     // but many tools will store premultiplied alpha anyway...
-    let threshold_count = color
-        .gt_tensor(&alpha)
-        .sum(tch::Kind::Int64)
-        .int64_value(&[]);
-
-    let color = if threshold_count > 0 {
-        color.multiply(&alpha)
-    } else {
-        color
-    };
+    //
+    // TODO: unnecessary device pin
+    let ones = Tensor::ones([3, h, w], (tch::Kind::Float, tch::Device::Cpu));
+    let mask = alpha.where_self(&color.gt_tensor(&alpha).any(), &ones);
+    let color = color.multiply(&mask);
 
     // Pure transparency is rescaled to be 8 steps "blacker than black"
     const ALPHA_LEVEL: f64 = 8.0 / 255.0;
@@ -155,7 +150,9 @@ fn visualize_attention(
     size: (i64, i64),
 ) -> Result<Tensor, Box<dyn Error>> {
     // discard CLS token, we just want patch embeddings
-    let a = last_hidden_state.slice(1, embeddings_offset, None, 1).squeeze();
+    let a = last_hidden_state
+        .slice(1, embeddings_offset, None, 1)
+        .squeeze();
     let pc = into_principal_components(&a, 3)?;
 
     // normalize
