@@ -45,6 +45,7 @@ fn strip_transparency(image: DynamicImage) -> Result<Tensor, Box<dyn Error>> {
         _ => {}
     };
 
+    // TODO: make sure we handle tRNS like 2013/10/8/444051.png
     // Get channels
     let (alpha, color) = {
         let pixels = into_tensor(image.into_rgba32f());
@@ -165,9 +166,20 @@ fn visualize_attention(
     Ok(pc.reshape([size.0, size.1, 3]).permute([2, 0, 1]))
 }
 
+fn print_single_dimensional_tensor(data: &Tensor) -> Result<(), Box<dyn Error>> {
+    use itertools::Itertools;
+
+    let size = data.size1()?;
+    let output: Vec<f64> = (0..size).map(|i| data.double_value(&[i])).collect();
+
+    println!("[{}]", output.iter().join(","));
+
+    Ok(())
+}
+
 fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
     // TODO: handle non-square images?
-    let image_scale = 4;
+    let image_scale = 1;
     let width = image_scale * 224;
     let height = image_scale * 224;
 
@@ -177,10 +189,19 @@ fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
     // TODO: evaluate what subset of features give good "similarity" results
     // Do we just want to evaluate the CLS token, or all of the patch tokens as well?
     let (last_hidden_state, pooler_output) = infer(image, &model)?;
-    println!("{}", scaled_result(&pooler_output.squeeze()).to_string(80)?);
+    let infer_result = scaled_result(&pooler_output.squeeze());
+    print_single_dimensional_tensor(&infer_result)?;
+
+    // 1 for dinov2
+    // 1 + 4 for dinov2-with-registers
+    const EMBEDDINGS_OFFSET: i64 = 1 + 4;
     save_image(
         "/tmp/attention.png",
-        &visualize_attention(&last_hidden_state, 1 + 4, (width / 14, width / 14))?,
+        &visualize_attention(
+            &last_hidden_state,
+            EMBEDDINGS_OFFSET,
+            (width / 14, height / 14),
+        )?,
     )?;
 
     Ok(())
