@@ -166,6 +166,16 @@ fn visualize_attention(
     Ok(pc.reshape([size.0, size.1, 3]).permute([2, 0, 1]))
 }
 
+#[allow(dead_code)]
+fn time<R, F: FnOnce() -> R>(label: &str, f: F) -> R {
+    let begin = std::time::Instant::now();
+    let r = f();
+    let end = std::time::Instant::now();
+    let duration = (end - begin).as_secs_f64();
+    eprintln!("{}: {}", label, duration);
+    r
+}
+
 fn print_single_dimensional_tensor(data: &Tensor) -> Result<(), Box<dyn Error>> {
     use itertools::Itertools;
 
@@ -178,10 +188,19 @@ fn print_single_dimensional_tensor(data: &Tensor) -> Result<(), Box<dyn Error>> 
 }
 
 fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
-    // TODO: handle non-square images?
+    // Features are somewhat stable across different global scales, and
+    // somewhat stable across dimensional scales.
     let image_scale = 1;
-    let width = image_scale * 224;
-    let height = image_scale * 224;
+
+    // Use 18 (252x252) instead of 16 (224x224) to produce a more detailed
+    // result and attention map at almost exactly the same computational cost
+    // TODO: deterministically handle highly non-square images?
+    let (width_patches, height_patches) = (18, 18);
+
+    // Side length of a square patch
+    const PATCH_DIM: i64 = 14;
+    let width = image_scale * width_patches * PATCH_DIM;
+    let height = image_scale * height_patches * PATCH_DIM;
 
     let image = load_image(&args.image, (width, height))?;
     let model = CModule::load(&args.pytorch_jit_model)?;
@@ -200,7 +219,7 @@ fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
         &visualize_attention(
             &last_hidden_state,
             EMBEDDINGS_OFFSET,
-            (width / 14, height / 14),
+            (width_patches, height_patches),
         )?,
     )?;
 
