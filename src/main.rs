@@ -166,7 +166,12 @@ fn visualize_attention(
 }
 
 fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
-    let image = load_image(&args.image, (224, 224))?;
+    // TODO: handle non-square images?
+    let image_scale = 4;
+    let width = image_scale * 224;
+    let height = image_scale * 224;
+
+    let image = load_image(&args.image, (width, height))?;
     let model = CModule::load(&args.pytorch_jit_model)?;
 
     // TODO: evaluate what subset of features give good "similarity" results
@@ -175,7 +180,7 @@ fn console_evaluate(args: &Args) -> Result<(), Box<dyn Error>> {
     println!("{}", scaled_result(&pooler_output.squeeze()).to_string(80)?);
     save_image(
         "/tmp/attention.png",
-        &visualize_attention(&last_hidden_state, 1 + 4, (16, 16))?,
+        &visualize_attention(&last_hidden_state, 1 + 4, (width / 14, width / 14))?,
     )?;
 
     Ok(())
