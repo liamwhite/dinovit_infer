@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Lines, Write};
+use std::io::{BufRead, BufReader, BufWriter, Lines, Write};
 use std::sync::Arc;
 use std::thread;
 
@@ -79,10 +79,9 @@ fn process_all_records<R, W>(
         match process_record(&config, &record) {
             Ok(None) => {}
             Ok(Some(features)) => {
+                let output = serde_json::to_string(&features).unwrap();
                 let mut writer = writer.lock();
-
-                serde_json::to_writer(&mut *writer, &features).unwrap();
-                writeln!(&mut writer).unwrap();
+                writeln!(&mut writer, "{}", output).unwrap();
             }
             Err(e) => {
                 eprintln!("\nError processing record {}: {}", record.id, e);
@@ -110,11 +109,14 @@ pub fn run(
     });
 
     let input_file = OpenOptions::new().read(true).open(input_json)?;
-    let input_file = Arc::new(Mutex::new(BufReader::new(input_file).lines()));
+    let input_file = BufReader::with_capacity(1048576, input_file).lines();
+    let input_file = Arc::new(Mutex::new(input_file));
+
     let output_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(output_json)?;
+    let output_file = BufWriter::with_capacity(1048576, output_file);
     let output_file = Arc::new(Mutex::new(output_file));
 
     let mut children = vec![];
