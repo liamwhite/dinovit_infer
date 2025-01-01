@@ -2,7 +2,15 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, ImageReader, Pixel, RgbImage
 use smallvec::SmallVec;
 use std::time::Instant;
 use std::{error::Error, io::BufReader};
-use tch::{Device, Tensor};
+use tch::{CModule, Device, Tensor};
+
+pub fn device_and_model(model_path: &str) -> Result<(Device, CModule), Box<dyn Error>> {
+    let device = Device::cuda_if_available();
+    let mut model = CModule::load(model_path)?;
+    model.to(device, tch::Kind::Float, false);
+
+    Ok((device, model))
+}
 
 fn into_tensor<P: Pixel<Subpixel = f32>>(
     image: ImageBuffer<P, Vec<f32>>,

@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tch::{CModule, Device};
 
-use crate::dinov2;
+use crate::{dinov2, io};
 
 #[derive(Debug, Deserialize)]
 struct Record {
@@ -101,12 +101,12 @@ pub fn run(
 ) -> Result<(), Box<dyn Error>> {
     tch::set_num_threads(1);
 
-    let model = CModule::load(model_path)?;
+    let (device, model) = io::device_and_model(model_path)?;
     let config = Arc::new(ProcessConfig {
         model,
         base_path: base_path.to_owned(),
         image_scale,
-        device: tch::Device::Cpu,
+        device,
     });
 
     let input_file = OpenOptions::new().read(true).open(input_json)?;

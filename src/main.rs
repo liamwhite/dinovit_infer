@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::error::Error;
-use std::{fs::OpenOptions, io::stdout};
-use tch::{CModule, Device};
+use std::fs::OpenOptions;
+use std::io::stdout;
 
 mod batch_inference;
 #[allow(dead_code)]
@@ -65,7 +65,7 @@ fn infer_single(
     output_attention_path: &str,
     image_scale: i64,
 ) -> Result<(), Box<dyn Error>> {
-    let model = CModule::load(model_path)?;
+    let (device, model) = io::device_and_model(model_path)?;
 
     let image_file = OpenOptions::new().read(true).open(image_path)?;
     let mut attention_file = OpenOptions::new()
@@ -74,7 +74,7 @@ fn infer_single(
         .truncate(true)
         .open(output_attention_path)?;
 
-    let result = dinov2::get_model_result(image_file, image_scale, &model, Device::Cpu)?;
+    let result = dinov2::get_model_result(image_file, image_scale, &model, device)?;
     io::write_tensor(&mut stdout().lock(), &result.features)?;
     println!();
 
@@ -93,15 +93,13 @@ fn cosine_similarity(
     image2_path: &str,
     image_scale: i64,
 ) -> Result<(), Box<dyn Error>> {
-    let model = CModule::load(model_path)?;
+    let (device, model) = io::device_and_model(model_path)?;
 
     let image1_file = OpenOptions::new().read(true).open(image1_path)?;
     let image2_file = OpenOptions::new().read(true).open(image2_path)?;
 
-    let features1 =
-        dinov2::get_model_result(image1_file, image_scale, &model, Device::Cpu)?.features;
-    let features2 =
-        dinov2::get_model_result(image2_file, image_scale, &model, Device::Cpu)?.features;
+    let features1 = dinov2::get_model_result(image1_file, image_scale, &model, device)?.features;
+    let features2 = dinov2::get_model_result(image2_file, image_scale, &model, device)?.features;
 
     let cosine_sim = features1
         .dot(&features2)
