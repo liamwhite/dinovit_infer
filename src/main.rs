@@ -3,6 +3,7 @@ use std::error::Error;
 use std::{fs::OpenOptions, io::stdout};
 use tch::{CModule, Device};
 
+mod batch_inference;
 #[allow(dead_code)]
 mod dinov2;
 #[allow(dead_code)]
@@ -40,6 +41,21 @@ enum Task {
 
         /// Second image to load.
         image2_path: String,
+    },
+
+    /// Runs full batch inference job.
+    BatchInference {
+        /// Base location of files.
+        base_path: String,
+
+        /// Path to file containing input JSON lines.
+        input_json: String,
+
+        /// Path to file to create containing output features.
+        output_json: String,
+
+        /// Number of threads to use.
+        num_threads: usize,
     },
 }
 
@@ -95,27 +111,30 @@ fn cosine_similarity(
     Ok(())
 }
 
+#[rustfmt::skip]
 fn console_execute() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     match args.task {
-        Task::InferSingle {
-            image_path,
-            output_attention_path,
-        } => infer_single(
+        Task::InferSingle { image_path, output_attention_path } => infer_single(
             &args.model_path,
             &image_path,
             &output_attention_path,
             args.image_scale,
         ),
-        Task::CosineSimilarity {
-            image1_path,
-            image2_path,
-        } => cosine_similarity(
+        Task::CosineSimilarity { image1_path, image2_path } => cosine_similarity(
             &args.model_path,
             &image1_path,
             &image2_path,
             args.image_scale,
+        ),
+        Task::BatchInference { base_path, input_json, output_json, num_threads } => batch_inference::run(
+            &args.model_path,
+            &base_path,
+            &input_json,
+            &output_json,
+            args.image_scale,
+            num_threads,
         ),
     }
 }

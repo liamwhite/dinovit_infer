@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5.23", features = ["derive"] }
 image = { version = "0.25.2", default-features = false, features = ["jpeg", "png"] }
-itertools = { version = "0.14" }
+parking_lot = "0.12"
 tch = { version = "0.18.1", features = ["download-libtorch"] }
 smallvec = { version = "1.13", features = ["const_generics"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
